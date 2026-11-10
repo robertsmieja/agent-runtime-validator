@@ -75,6 +75,19 @@ require_mac_profile = true
 # Probe 34: NoNewPrivs=1 on the running process.
 require_no_new_privs = true
 
+[account]
+# Probe 35: validate the Unix account the harness runs as.
+# expected_user = "agent"
+# expected_uid = 1000
+deny_groups = ["sudo", "wheel", "root", "docker", "adm"]
+# Password must be locked (passwd -S shows L): no direct login path.
+require_locked_password = true
+# expected_shell = "/usr/sbin/nologin"
+# Home dir mode must be one of these (0750 default here).
+home_modes = ["700", "750"]
+# No SSH authorized_keys on the account.
+require_no_authorized_keys = true
+
 [secrets]
 # Probe 13: env keys containing any of these substrings (case-insensitive)
 # must be in env_allowlist.

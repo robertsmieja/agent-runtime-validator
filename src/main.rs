@@ -22,6 +22,8 @@ struct Config {
     jail: Jail,
     #[serde(default)]
     sandbox: Sandbox,
+    #[serde(default)]
+    account: Account,
     secrets: Secrets,
     resources: Resources,
     audit: AuditCfg,
@@ -132,6 +134,55 @@ impl Default for Sandbox {
 }
 fn default_min_seccomp() -> u8 {
     2
+}
+
+#[derive(Deserialize)]
+struct Account {
+    // 35: expected Unix account running the harness. When set, the current
+    // user must match exactly.
+    #[serde(default)]
+    expected_user: Option<String>,
+    // 35: exact UID (when set).
+    #[serde(default)]
+    expected_uid: Option<u32>,
+    // 35: group memberships that FAIL the gate.
+    #[serde(default = "default_deny_groups")]
+    deny_groups: Vec<String>,
+    // 35: password must be locked (passwd -S reports 'L') so the account
+    // cannot be logged into directly.
+    #[serde(default = "yes")]
+    require_locked_password: bool,
+    // 35: expected login shell (empty = skip).
+    #[serde(default)]
+    expected_shell: String,
+    // 35: home directory mode must be one of these octal strings.
+    #[serde(default = "default_home_modes")]
+    home_modes: Vec<String>,
+    // 35: ~/.ssh/authorized_keys must be absent (empty allowlist skips).
+    #[serde(default = "yes")]
+    require_no_authorized_keys: bool,
+}
+fn default_deny_groups() -> Vec<String> {
+    ["sudo", "wheel", "root", "docker", "adm"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
+fn default_home_modes() -> Vec<String> {
+    ["700", "750"].into_iter().map(String::from).collect()
+}
+impl Default for Account {
+    fn default() -> Self {
+        Account {
+            expected_user: None,
+            expected_uid: None,
+            deny_groups: default_deny_groups(),
+            require_locked_password: true,
+            expected_shell: String::new(),
+            home_modes: default_home_modes(),
+            require_no_authorized_keys: true,
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -641,6 +692,108 @@ fn run_probes(cfg: &Config, ctx: &Ctx, only: Option<&str>) -> Vec<ProbeResult> {
                 name: "no_new_privs",
                 status: if nnp == 1 { Status::PASS } else { Status::FAIL },
                 detail: format!("NoNewPrivs={} (need 1; set by launcher or prctl)", nnp),
+            });
+        }
+
+        // --- Account (35) ---
+        if let Some(user) = &cfg.account.expected_user {
+            let uid_v = uid();
+            let (_, id_out) = sh(&format!("id -un {}", uid_v));
+            let cur = id_out.trim().to_string();
+            add(&mut r, ProbeResult {
+                id: 35,
+                section: "account",
+                name: "expected_user",
+                status: if cur == *user { Status::PASS } else { Status::FAIL },
+                detail: format!("running as '{}' (need '{}')", cur, user),
+            });
+        }
+        if let Some(want) = cfg.account.expected_uid {
+            let ok = uid() == want;
+            add(&mut r, ProbeResult {
+                id: 35,
+                section: "account",
+                name: "expected_uid",
+                status: if ok { Status::PASS } else { Status::FAIL },
+                detail: format!("uid={} (need {})", uid(), want),
+            });
+        }
+        if !cfg.account.deny_groups.is_empty() {
+            let (_, groups_out) = sh("id -nG");
+            let member: Vec<&str> = groups_out
+                .split_whitespace()
+                .filter(|g| cfg.account.deny_groups.iter().any(|d| d == g))
+                .collect();
+            add(&mut r, ProbeResult {
+                id: 35,
+                section: "account",
+                name: "deny_group_membership",
+                status: if member.is_empty() { Status::PASS } else { Status::FAIL },
+                detail: if member.is_empty() {
+                    format!("not in any of {:?}", cfg.account.deny_groups)
+                } else {
+                    format!("member of privileged group(s): {member:?}")
+                },
+            });
+        }
+        if cfg.account.require_locked_password {
+            let user = cfg.account
+                .expected_user
+                .clone()
+                .unwrap_or_else(|| sh("id -un").1.trim().to_string());
+            let (code, out) = sh(&format!("passwd -S {}", shellq(&user)));
+            // passwd -S: name status L/P/NP (locked / password / none)
+            let locked = out.split_whitespace().nth(1).map(|s| s == "L").unwrap_or(false);
+            let ok = code == Some(0) && locked;
+            add(&mut r, ProbeResult {
+                id: 35,
+                section: "account",
+                name: "password_locked",
+                status: if ok { Status::PASS } else { Status::FAIL },
+                detail: format!(
+                    "passwd -S {} exit={:?} status={} (need L=locked)",
+                    user,
+                    code,
+                    out.split_whitespace().nth(1).unwrap_or("?")
+                ),
+            });
+        }
+        if !cfg.account.expected_shell.is_empty() {
+            let user = cfg.account
+                .expected_user
+                .clone()
+                .unwrap_or_else(|| sh("id -un").1.trim().to_string());
+            let (code, out) = sh(&format!("getent passwd {}", shellq(&user)));
+            let shell = out.trim().rsplit(':').next().unwrap_or("?").to_string();
+            add(&mut r, ProbeResult {
+                id: 35,
+                section: "account",
+                name: "expected_shell",
+                status: if code == Some(0) && shell == cfg.account.expected_shell { Status::PASS } else { Status::FAIL },
+                detail: format!("shell={} (need {})", shell, cfg.account.expected_shell),
+            });
+        }
+        if !cfg.account.home_modes.is_empty() {
+            let home = expand("~", &ctx.home);
+            let (_, out) = sh(&format!("stat -c %a {}", shellq(&home)));
+            let mode = out.trim().to_string();
+            add(&mut r, ProbeResult {
+                id: 35,
+                section: "account",
+                name: "home_dir_mode",
+                status: if cfg.account.home_modes.iter().any(|m| *m == mode) { Status::PASS } else { Status::FAIL },
+                detail: format!("home {} mode={} (allowed {:?})", home, mode, cfg.account.home_modes),
+            });
+        }
+        if cfg.account.require_no_authorized_keys {
+            let keys = format!("{}/.ssh/authorized_keys", ctx.home);
+            let exists = std::path::Path::new(&keys).exists();
+            add(&mut r, ProbeResult {
+                id: 35,
+                section: "account",
+                name: "no_authorized_keys",
+                status: if !exists { Status::PASS } else { Status::FAIL },
+                detail: format!("{} {}", keys, if exists { "EXISTS (SSH entry path open)" } else { "absent" }),
             });
         }
     }
