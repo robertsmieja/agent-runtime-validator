@@ -1,5 +1,13 @@
 # agent-runtime-validator
 
+> [!WARNING]
+> **Proof-of-concept / test project — NOT for production use.**
+> This is an unvalidated experimental tool. The probe implementations have not
+> been audited, coverage of the underlying runbook is partial (several probes
+> are manual/SKIP by design), and the probe mechanics (shell-out heuristics)
+> can produce both false passes and false fails. Do not rely on it as a
+> security gate for any real system without your own review and testing.
+
 Harness-agnostic validation gate for hardened agent runtime images.
 Rust implementation of the 26-probe verification runbook from
 `~/reports/runner-research/agent-vm-package/implement/verification-runbook.md`.
