@@ -1,5 +1,7 @@
 # agent-runtime-validator
 
+[![CI](https://github.com/robertsmieja/agent-runtime-validator/actions/workflows/ci.yml/badge.svg)](https://github.com/robertsmieja/agent-runtime-validator/actions/workflows/ci.yml)
+
 > [!WARNING]
 > **Proof-of-concept / test project — NOT for production use.**
 > This is an unvalidated experimental tool. The probe implementations have not
@@ -44,7 +46,10 @@ arv validate --config PATH [--json] [--digest D] [--operator NAME]
   34 no_new_privs).
 
 - Probe IDs match the runbook 1:1, so the emitted report drops directly into
-  the sign-off record (image digest + results + date + operator).
+  the sign-off record (image digest + results + date + operator). Probe 35
+  validates the Unix account (config section `account`, selectable with
+  `--only account`); URLs beyond the runbook's 1-4 egress probes get IDs 40+ /
+  50+ so they can never collide with the fixed probe range.
 - `--json` emits a machine-readable report with config SHA-256 binding.
 - SKIP is deliberately not PASS: the summary forces sign-off to account for
   every skipped probe (unconfigured collectors, admin-only tamper tests, …).
