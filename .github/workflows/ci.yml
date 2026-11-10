@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Smoke test (config parse + JSON report)
+        run: |
+          ./target/release/agent-runtime-validator check-config config/default.toml
+          ./target/release/agent-runtime-validator init /tmp/smoke-config.toml
+          ./target/release/agent-runtime-validator validate \
+            --config /tmp/smoke-config.toml --only signing --json | grep '"summary"'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-runtime-validator
+          path: target/release/agent-runtime-validator
