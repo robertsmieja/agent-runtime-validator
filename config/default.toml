@@ -39,6 +39,19 @@ nft_check = true
 remount_paths = ["/opt/harness"]
 # Probe 12: exact suid allowlist; any extra binary is a FAIL.
 suid_allowlist = []
+# Probe 27: validator must run as non-root with zero effective capabilities.
+require_non_root = true
+# Probe 28: bubblewrap must exist AND actually construct a sandbox.
+check_bwrap = true
+# Probe 29: Landlock must appear in the kernel LSM list.
+check_landlock = true
+
+[jail]
+# Probe 30: filesystem jail. Writes are attempted in every listed path;
+# paths under allow_write_paths must be writable, all others (deny_write_paths)
+# must be blocked. Point deny paths at locations the agent must never touch.
+deny_write_paths = ["~/arv-probe-deny", "/etc/arv-probe-deny", "/usr/local/arv-probe-deny", "/opt/arv-probe-deny"]
+allow_write_paths = ["/tmp/arv-work"]
 
 [secrets]
 # Probe 13: env keys containing any of these substrings (case-insensitive)

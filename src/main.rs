@@ -18,6 +18,8 @@ struct Config {
     target: Target,
     egress: Egress,
     privilege: Privilege,
+    #[serde(default)]
+    jail: Jail,
     secrets: Secrets,
     resources: Resources,
     audit: AuditCfg,
@@ -78,6 +80,25 @@ struct Privilege {
     remount_paths: Vec<String>,
     #[serde(default)]
     suid_allowlist: Vec<String>,
+    // 27: require the validator runs as a non-root user with no effective caps.
+    #[serde(default)]
+    require_non_root: bool,
+    // 28: bubblewrap must exist AND actually construct a sandbox.
+    #[serde(default)]
+    check_bwrap: bool,
+    // 29: Landlock must appear in the kernel LSM list.
+    #[serde(default)]
+    check_landlock: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct Jail {
+    // 30: each path is attempted; writes OUTSIDE allowed roots must FAIL,
+    // a write inside the target work_dir must SUCCEED.
+    #[serde(default)]
+    deny_write_paths: Vec<String>,
+    #[serde(default)]
+    allow_write_paths: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -397,6 +418,102 @@ fn run_probes(cfg: &Config, ctx: &Ctx, only: Option<&str>) -> Vec<ProbeResult> {
                 found.len(), extra, missing, trunc(&out, 200)
             ),
         });
+        // 27: non-root user with no effective capabilities
+        if pv.require_non_root {
+            let uid_v = uid();
+            let caps = std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|s| {
+                    s.lines().find(|l| l.starts_with("CapEff:")).map(|l| {
+                        l.split_whitespace().last().unwrap_or("?").to_string()
+                    })
+                })
+                .unwrap_or_else(|| "?".into());
+            let no_caps = caps == "0000000000000000";
+            let ok27 = uid_v != 0 && no_caps;
+            add(&mut r, ProbeResult {
+                id: 27,
+                section: "privilege",
+                name: "non_root_no_caps",
+                status: if ok27 { Status::PASS } else { Status::FAIL },
+                detail: format!("uid={} CapEff={} (need uid!=0 and zero effective caps)", uid_v, caps),
+            });
+        }
+        // 28: bubblewrap constructs a real sandbox
+        if pv.check_bwrap {
+            let (code, out) = sh("bwrap --ro-bind / / --proc /proc --dev /dev --unshare-all true");
+            let bwrap_ok = code == Some(0);
+            // userns availability explains most bwrap failures
+            let userns_exit = sh("unshare --user --map-root-user true").0;
+            add(&mut r, ProbeResult {
+                id: 28,
+                section: "privilege",
+                name: "bwrap_sandbox",
+                status: if bwrap_ok { Status::PASS } else { Status::FAIL },
+                detail: format!(
+                    "bwrap exit={:?} userns_exit={:?}{}",
+                    code,
+                    userns_exit,
+                    if bwrap_ok { String::new() } else { trunc(&out, 160) }
+                ),
+            });
+        }
+        // 29: Landlock active in kernel LSM list
+        if pv.check_landlock {
+            let lsm = std::fs::read_to_string("/sys/kernel/security/lsm").unwrap_or_default();
+            let has = lsm.split(',').any(|s| s.trim() == "landlock");
+            add(&mut r, ProbeResult {
+                id: 29,
+                section: "privilege",
+                name: "landlock_kernel",
+                status: if has { Status::PASS } else { Status::FAIL },
+                detail: if lsm.is_empty() {
+                    "/sys/kernel/security/lsm unreadable (securityfs not mounted?)".into()
+                } else {
+                    format!("lsm list: {}", lsm.trim())
+                },
+            });
+        }
+        // 30: filesystem jail — writes outside allowed roots fail, inside succeed
+        if !cfg.jail.deny_write_paths.is_empty() || !cfg.jail.allow_write_paths.is_empty() {
+            let mut jail_fail = false;
+            let mut details: Vec<String> = Vec::new();
+            for path in cfg.jail.deny_write_paths.iter().chain(cfg.jail.allow_write_paths.iter()) {
+                let p = expand(path, &ctx.home);
+                let allowed = cfg.jail.allow_write_paths.iter().any(|a| path.starts_with(a.as_str()) || expand(a, &ctx.home) == p);
+                if allowed {
+                    let _ = std::fs::create_dir_all(&p);
+                }
+                let probe = format!("{}/arv-probe-{}", p, std::process::id());
+                if !std::path::Path::new(&p).is_dir() {
+                    details.push(format!("{p}: parent missing (not evaluated)"));
+                    continue;
+                }
+                let attempt = std::fs::File::create(&probe);
+                let wrote = attempt.is_ok();
+                if wrote {
+                    drop(attempt.unwrap());
+                    let _ = std::fs::remove_file(&probe);
+                }
+                let expect_success = allowed;
+                let ok30 = wrote == expect_success;
+                if !ok30 {
+                    jail_fail = true;
+                }
+                details.push(format!(
+                    "{p}: {} (expected {})",
+                    if wrote { "WRITABLE" } else { "blocked" },
+                    if expect_success { "writable" } else { "blocked" }
+                ));
+            }
+            add(&mut r, ProbeResult {
+                id: 30,
+                section: "privilege",
+                name: "fs_jail",
+                status: if jail_fail { Status::FAIL } else { Status::PASS },
+                detail: details.join("; "),
+            });
+        }
     }
 
     // --- Secrets ---
