@@ -1,0 +1,79 @@
+# agent-runtime-validator default configuration
+# Mirrors the 26-probe verification runbook:
+# ~/reports/runner-research/agent-vm-package/implement/verification-runbook.md
+# Every probe has an expected result; any FAIL blocks the image (exit 1).
+# Omit a key (or set it to "") to skip that probe.
+
+[meta]
+config_version = 1
+
+[target]
+# Destructive probes (fallocate, load test) write here.
+work_dir = "/tmp/arv-work"
+
+[egress]
+timeout_secs = 5
+# Probes 1, 3, 4: must FAIL (deny/timeout), exit code recorded.
+deny_urls = [
+  "https://evil.example",
+  "http://169.254.169.254/latest/meta-data/",
+  "http://metadata.google.internal/",
+]
+# Probe 2: must SUCCEED; set allow_enabled=false if this task class
+# does not permit runtime pulls.
+allow_enabled = true
+allow_urls = ["https://github.com"]
+# Probes 5-7 (DNS).
+dns_direct_server = "8.8.8.8"
+dns_resolver_name = "github.com"
+dns_nxdomain_name = "definitely-not-allowlisted.example"
+
+[privilege]
+# Probe 8.
+sudo_expected = false
+# Probe 9: nft list ruleset must be permission-denied.
+nft_check = true
+# Probe 10: route add must fail (no CAP_NET_ADMIN). Omit to skip.
+# route_test_via = "192.168.1.1"
+# Probe 11: remount rw must fail.
+remount_paths = ["/opt/harness"]
+# Probe 12: exact suid allowlist; any extra binary is a FAIL.
+suid_allowlist = []
+
+[secrets]
+# Probe 13: env keys containing any of these substrings (case-insensitive)
+# must be in env_allowlist.
+env_substrings = ["key", "token", "secret", "password", "credential"]
+env_allowlist = ["OPENAI_API_KEY", "ARV_CANARY_TOKEN"]
+# Probe 14: must not exist.
+forbidden_paths = ["~/.ssh", "~/.git-credentials", "~/.netrc"]
+# Probe 15: admin/agent visibility of the env file. Omit to skip.
+env_file = "/run/agent-env"
+# Probe 16: git push must fail. Path must be a git repo; omit to skip.
+# git_push_dir = "/srv/work/x"
+git_push_args = ["push", "origin", "main"]
+
+[resources]
+# Probe 17: session scope must exist and carry limits.
+scope_name = "agent"
+limit_substrings = ["MemoryMax", "TasksMax", "CPUQuota"]
+# Probe 19: fallocate must fail at quota. Size in GiB.
+fallocate_gib = 999
+# Probe 20: wall-clock kill. Requires a scope runner command; omit to skip.
+# scope_runner_cmd = "systemd-run --scope --user -p MemoryMax=1G"
+scope_timeout_secs = 60
+
+[audit]
+# Probe 21: command to run, then the collector log must contain it
+# within the window. collector_log_cmd: a command whose output includes
+# recent audit events (e.g. journalctl -t auditd --since -5m).
+exec_probe_cmd = "bash -c 'echo hi'"
+# collector_log_cmd = "journalctl -t auditd --since -5m"
+# Probe 23: canary request; token read from this env var.
+canary_url = "https://gateway.internal/v1"
+canary_token_env = "ARV_CANARY_TOKEN"
+
+[signing]
+# Probe 26 (admin): cosign verify the published digest.
+# registry_ref = "registry.example/agent-vm@sha256:..."
+# cosign_key = "/etc/agent-vm/cosign.pub"
