@@ -32,11 +32,16 @@ beyond coreutils/curl/dig present on the image).
 ## Usage
 
 ```
-arv init [PATH]          starter config (TOML, mirrors all 26 probes)
+arv init [PATH]          starter config (TOML, mirrors all probes)
 arv check-config [PATH]  parse + validate config
 arv validate --config PATH [--json] [--digest D] [--operator NAME]
                 [--only SECTION] [--admin] [--destructive]
 ```
+
+- Probe IDs map to the source runbook (1–26) plus added confinement probes
+  (27 non-root/no-caps, 28 bubblewrap sandbox, 29 Landlock LSM, 30 filesystem
+  jail, 31 seccomp filter, 32 systemd unit restrictions, 33 MAC profile,
+  34 no_new_privs).
 
 - Probe IDs match the runbook 1:1, so the emitted report drops directly into
   the sign-off record (image digest + results + date + operator).

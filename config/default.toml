@@ -53,6 +53,28 @@ check_landlock = true
 deny_write_paths = ["~/arv-probe-deny", "/etc/arv-probe-deny", "/usr/local/arv-probe-deny", "/opt/arv-probe-deny"]
 allow_write_paths = ["/tmp/arv-work"]
 
+[sandbox]
+# Probes 31/33/34 inspect the VALIDATOR's own process — run arv inside the
+# agent's confinement (bwrap/unit) so /proc/self reflects what the harness
+# applies, not an unconfined shell.
+# Probe 31: seccomp level on the running process (0=off 1=strict 2=filter).
+# 0 disables the probe.
+min_seccomp = 2
+# Probe 32: systemd unit whose effective properties must match verbatim.
+# systemctl show is read back, so set-negotiated defaults also count.
+# systemd_unit = "agent-harness.service"
+# systemd_required_props = [
+#   "ProtectSystem=strict",
+#   "ProtectHome=yes",
+#   "PrivateTmp=yes",
+#   "NoNewPrivileges=yes",
+#   "RestrictSUIDSGID=yes",
+# ]
+# Probe 33: AppArmor/SELinux profile attached (attr/current != unconfined).
+require_mac_profile = true
+# Probe 34: NoNewPrivs=1 on the running process.
+require_no_new_privs = true
+
 [secrets]
 # Probe 13: env keys containing any of these substrings (case-insensitive)
 # must be in env_allowlist.

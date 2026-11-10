@@ -20,6 +20,8 @@ struct Config {
     privilege: Privilege,
     #[serde(default)]
     jail: Jail,
+    #[serde(default)]
+    sandbox: Sandbox,
     secrets: Secrets,
     resources: Resources,
     audit: AuditCfg,
@@ -89,6 +91,47 @@ struct Privilege {
     // 29: Landlock must appear in the kernel LSM list.
     #[serde(default)]
     check_landlock: bool,
+}
+
+#[derive(Deserialize)]
+struct Sandbox {
+    // 31: own process must run under seccomp with filter level >= min_seccomp
+    // (0 disables; 1 = strict, 2 = seccomp-bpf filter). The validator is
+    // expected to be launched INSIDE the agent's confinement, so its own
+    // /proc/self/status reflects what the harness applies.
+    #[serde(default = "default_min_seccomp")]
+    min_seccomp: u8,
+    // 32: named systemd unit must expose exactly these effective properties
+    // (entries of the form "ProtectSystem=strict"; compared verbatim).
+    #[serde(default)]
+    systemd_unit: Option<String>,
+    #[serde(default)]
+    systemd_required_props: Vec<String>,
+    // Query the user manager (systemctl --user) rather than the system one.
+    #[serde(default = "yes")]
+    systemd_user: bool,
+    // 33: an AppArmor/SELinux profile must be attached (attr/current not
+    // "unconfined").
+    #[serde(default)]
+    require_mac_profile: bool,
+    // 34: own process must have NoNewPrivs=1.
+    #[serde(default)]
+    require_no_new_privs: bool,
+}
+impl Default for Sandbox {
+    fn default() -> Self {
+        Sandbox {
+            min_seccomp: default_min_seccomp(),
+            systemd_unit: None,
+            systemd_required_props: Vec::new(),
+            systemd_user: true,
+            require_mac_profile: false,
+            require_no_new_privs: false,
+        }
+    }
+}
+fn default_min_seccomp() -> u8 {
+    2
 }
 
 #[derive(Deserialize, Default)]
@@ -512,6 +555,92 @@ fn run_probes(cfg: &Config, ctx: &Ctx, only: Option<&str>) -> Vec<ProbeResult> {
                 name: "fs_jail",
                 status: if jail_fail { Status::FAIL } else { Status::PASS },
                 detail: details.join("; "),
+            });
+        }
+
+        // 31: seccomp filter on the running process
+        if cfg.sandbox.min_seccomp > 0 {
+            let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+            let seccomp = status
+                .lines()
+                .find(|l| l.starts_with("Seccomp:"))
+                .and_then(|l| l.split_whitespace().last().and_then(|v| v.parse::<u8>().ok()))
+                .unwrap_or(0);
+            add(&mut r, ProbeResult {
+                id: 31,
+                section: "privilege",
+                name: "seccomp_filter",
+                status: if seccomp >= cfg.sandbox.min_seccomp { Status::PASS } else { Status::FAIL },
+                detail: format!(
+                    "Seccomp={} (need >= {}; 0=off 1=strict 2=filter; validator must run inside the confinement it verifies)",
+                    seccomp, cfg.sandbox.min_seccomp
+                ),
+            });
+        }
+        // 32: effective systemd unit restrictions
+        if let (Some(unit), props) = (&cfg.sandbox.systemd_unit, &cfg.sandbox.systemd_required_props) {
+            if !props.is_empty() {
+                let keys: Vec<&str> = props.iter().filter_map(|p| p.split('=').next()).collect();
+                let cmd = format!(
+                    "systemctl show {} {} --no-pager {}",
+                    if cfg.sandbox.systemd_user { "--user" } else { "--system" },
+                    shellq(unit),
+                    keys.iter().map(|k| format!("--property={}", k)).collect::<Vec<_>>().join(" ")
+                );
+                let (code, out) = sh(&cmd);
+                let mut mismatches: Vec<String> = Vec::new();
+                if code != Some(0) {
+                    mismatches.push(format!("systemctl show failed exit={:?}{}", code, trunc(&out, 120)));
+                } else {
+                    for want in props {
+                        let found = out.lines().any(|l| l.trim() == want.as_str());
+                        if !found {
+                            mismatches.push(want.clone());
+                        }
+                    }
+                }
+                add(&mut r, ProbeResult {
+                    id: 32,
+                    section: "privilege",
+                    name: "systemd_unit_restrictions",
+                    status: if mismatches.is_empty() { Status::PASS } else { Status::FAIL },
+                    detail: if mismatches.is_empty() {
+                        format!("unit {unit}: all {} required properties match", props.len())
+                    } else {
+                        format!("unit {unit}: missing/mismatched: {mismatches:?}")
+                    },
+                });
+            }
+        } else {
+            skip(&mut r, 32, "privilege", "systemd_unit_restrictions", "systemd_unit not configured");
+        }
+        // 33: MAC profile attached
+        if cfg.sandbox.require_mac_profile {
+            let current = std::fs::read_to_string("/proc/self/attr/current").unwrap_or_default();
+            let cur = current.trim().to_string();
+            let confined = !cur.is_empty() && cur != "unconfined";
+            add(&mut r, ProbeResult {
+                id: 33,
+                section: "privilege",
+                name: "mac_profile_attached",
+                status: if confined { Status::PASS } else { Status::FAIL },
+                detail: format!("attr/current = '{}' (need an AppArmor/SELinux profile, not unconfined)", cur),
+            });
+        }
+        // 34: no_new_privs
+        if cfg.sandbox.require_no_new_privs {
+            let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+            let nnp = status
+                .lines()
+                .find(|l| l.starts_with("NoNewPrivs:"))
+                .and_then(|l| l.split_whitespace().last().and_then(|v| v.parse::<u8>().ok()))
+                .unwrap_or(0);
+            add(&mut r, ProbeResult {
+                id: 34,
+                section: "privilege",
+                name: "no_new_privs",
+                status: if nnp == 1 { Status::PASS } else { Status::FAIL },
+                detail: format!("NoNewPrivs={} (need 1; set by launcher or prctl)", nnp),
             });
         }
     }
